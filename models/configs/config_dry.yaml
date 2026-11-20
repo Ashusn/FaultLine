@@ -1,0 +1,249 @@
+seed: 7
+gpu_hourly_usd: 1.09
+hub:
+  namespace: AmareshHebbar
+  prefix: DRY_FaultLine_
+  private: true
+  collection: DRY FaultLine Models
+  collection_description: Models and datasets for FaultLine, root cause analysis with proof for distributed systems.
+  datasets:
+    incidents: Incidents
+    compressor: Compressor_Data
+    retrieval: Retrieval_Data
+    claims: Claims_Data
+check:
+  python:
+  - 3
+  - 11
+  require_gpu: true
+  require_hf: true
+  min_free_gb: 20
+  real_batch: false
+data:
+  window_s: 600
+  max_logs: 200
+  max_traces: 40
+  sim:
+    enabled: true
+    n_per_combo: 2
+    n_traces: 12
+  rcaeval:
+    enabled: true
+    repo: phamquiluan/RCAEval
+    suites:
+    - re1
+    - re2
+    max_cases: 4
+    patterns:
+    - cases.parquet
+    - re1ob_adservice_cpu_1/*
+    - re2tt_ts-order-service_cpu_1/*
+  jsonl: []
+signals:
+  top_k: 8
+  z_min: 3.0
+  ratio_min: 0.405
+  err_min: 0.01
+  log_min_diff: 3
+  trace_min_err: 2
+split:
+  val: 0.15
+  test: 0.2
+  holdout_faults:
+  - pool_exhaustion
+  - socket_exhaustion
+  holdout_apps:
+  - bookstore
+  - sock_shop
+retrieval:
+  runbook_dirs:
+  - runbooks
+  code_dirs:
+  - ../platform/services
+  max_code_positives: 3
+  max_positives_per_query: 4
+  query_anomalies: 5
+  synthetic:
+    enabled: false
+    base_url: http://localhost:8000/v1
+    model: Qwen/Qwen2.5-7B-Instruct
+    api_key_env: SYNTH_API_KEY
+    per_query: 2
+    temperature: 0.8
+claims:
+  false_per_item: 2
+eval:
+  quick_n: 30
+  full_n: 40
+  min_quick_items: 10
+  full_splits:
+  - test
+  - test_ood_fault
+  - test_ood_app
+  gate_drop: 1.0
+  gate_drop_by_model: {}
+models:
+  embedder:
+    type: embedder
+    repo: Embed_bge_small
+    base: BAAI/bge-small-en-v1.5
+    dataset: retrieval
+    description: Embedding model for incident retrieval over runbooks, past incidents and source code.
+    method: contrastive fine tuning with cached multiple negatives ranking loss and mined hard negatives
+    query_prefix: 'Represent this sentence for searching relevant passages: '
+    doc_prefix: ''
+    baselines:
+    - id: thenlper/gte-small
+      label: gte_small
+      query_prefix: ''
+      doc_prefix: ''
+    main_metric: ndcg@10
+    report_metrics:
+    - recall@10
+    - mrr@10
+    - recall@50
+    epochs: 1
+    batch_size: 16
+    mini_batch_size: 8
+    lr: 2.0e-05
+    warmup_steps: 20
+    max_seq_length: 512
+    hard_negatives: true
+    num_negatives: 3
+    neg_range_min: 5
+    neg_range_max: 50
+    neg_relative_margin: 0.05
+    usage: 'from sentence_transformers import SentenceTransformer
+
+      m = SentenceTransformer("{repo}")
+
+      q = m.encode(["Represent this sentence for searching relevant passages: payments latency p95 ms 40 to 900"])
+
+      '
+    max_steps: 10
+  reranker:
+    type: reranker
+    repo: Rerank_MiniLM
+    base: cross-encoder/ms-marco-MiniLM-L6-v2
+    dataset: retrieval
+    description: Cross encoder that reorders retrieved runbook, code and incident chunks for an incident query.
+    method: binary cross entropy on positives and hard negatives from the first stage retriever
+    first_stage: embedder
+    candidates: 20
+    negatives_per_query: 4
+    main_metric: ndcg@10
+    report_metrics:
+    - recall@10
+    - candidate_recall
+    epochs: 1
+    batch_size: 16
+    lr: 2.0e-05
+    max_length: 512
+    usage: 'from sentence_transformers.cross_encoder import CrossEncoder
+
+      m = CrossEncoder("{repo}")
+
+      scores = m.predict([("payments latency rose", "fault db_slow ...")])
+
+      '
+    max_steps: 10
+  compressor_sft:
+    type: compressor
+    method_kind: sft
+    repo: Compressor_Qwen3_0.6B_SFT
+    base: Qwen/Qwen3-0.6B
+    dataset: compressor
+    description: Turns a long telemetry window into short structured incident signals as JSON.
+    method: supervised fine tuning with LoRA on window to signals pairs
+    main_metric: signal_f1
+    report_metrics:
+    - valid_json
+    - token_ratio
+    - downstream_top1
+    lora: true
+    lora_r: 32
+    lora_alpha: 64
+    lora_dropout: 0.05
+    epochs: 2
+    batch_size: 1
+    grad_accum: 1
+    lr: 0.0001
+    warmup_steps: 20
+    max_length: 3072
+    max_input_chars: 6000
+    max_new_tokens: 256
+    gradient_checkpointing: true
+    eval_batch: 8
+    use_vllm: false
+    trade_offs: Greedy decoding. The model only reports what it sees in the window, so a fault that leaves no trace in metrics, logs or spans is invisible to it.
+    max_steps: 6
+  compressor_grpo:
+    type: compressor
+    method_kind: grpo
+    init_from: compressor_sft
+    repo: Compressor_Qwen3_0.6B_GRPO
+    base: Qwen/Qwen3-0.6B
+    dataset: compressor
+    description: The SFT compressor further trained with GRPO, using a reward we can check against the reference signals.
+    method: GRPO with rewards for valid JSON, signal F1 against the reference, and length
+    main_metric: signal_f1
+    report_metrics:
+    - valid_json
+    - token_ratio
+    - downstream_top1
+    lora: true
+    lora_r: 16
+    lora_alpha: 32
+    max_steps: 3
+    max_prompts: 16
+    batch_size: 4
+    grad_accum: 1
+    num_generations: 2
+    lr: 5.0e-06
+    beta: 0.04
+    temperature: 0.8
+    reward_weights:
+    - 0.3
+    - 1.0
+    - 0.3
+    max_length: 3072
+    max_new_tokens: 256
+    gradient_checkpointing: true
+    eval_batch: 8
+    use_vllm: false
+    train_vllm: false
+  classifier:
+    type: classifier
+    repo: RootCause_Classifier
+    base: rule
+    dataset: incidents
+    description: Fast root cause model. Ranks services and predicts the fault kind from incident signals in milliseconds.
+    method: gradient boosted trees on per service signal features
+    main_metric: top1
+    report_metrics:
+    - top3
+    - fault_acc
+    study_sources:
+    - compressor_sft
+    - compressor_grpo
+    max_iter: 50
+    lr: 0.05
+    max_leaf_nodes: 31
+  verifier:
+    type: verifier
+    repo: ClaimVerifier_DeBERTa_v3_xsmall
+    base: microsoft/deberta-v3-xsmall
+    dataset: claims
+    description: Checks whether a report sentence is supported by the evidence it cites.
+    method: cross encoder fine tuned on true claims and six kinds of broken claims
+    main_metric: correct
+    report_metrics:
+    - catch
+    - false_reject
+    epochs: 1
+    batch_size: 16
+    lr: 2.0e-05
+    warmup_steps: 50
+    max_length: 384
+    threshold: 0.5
+    max_steps: 10

@@ -99,8 +99,54 @@ def add_to_collection(cfg, repos):
                 a.add_collection_item(col.slug, item_id=r, item_type=kind, exists_ok=True)
             except Exception as e:
                 log("collection item skipped", r, e)
+        from .common import wpath, write_json
+
+        write_json(wpath(cfg, "results", "collection.json"), {"slug": col.slug, "url": f"https://huggingface.co/collections/{col.slug}"})
+        return col.slug
     except Exception as e:
         log("collection skipped", e)
+
+
+def run_id(cfg):
+    from .steps import load_state, save_state
+
+    s = load_state(cfg)
+    if not s.get("run_id"):
+        s["run_id"] = time.strftime("%Y%m%d_%H%M%S", time.gmtime()) + "_" + Path(cfg["_path"]).stem
+        save_state(cfg, s)
+    return s["run_id"]
+
+
+def runs_url(cfg):
+    return f"https://huggingface.co/datasets/{dataset_repo(cfg, 'runs')}/tree/main/runs/{run_id(cfg)}"
+
+
+def upload_run(cfg, final=False):
+    try:
+        rid = run_id(cfg)
+        snap = Path("/tmp/flm_run") / rid
+        shutil.rmtree(snap, ignore_errors=True)
+        snap.mkdir(parents=True)
+        for sub in ("logs", "results", "report"):
+            src = wdir(cfg, sub)
+            if any(src.iterdir()):
+                shutil.copytree(src, snap / sub, ignore=shutil.ignore_patterns("*.safetensors", "*.bin", "*.pt", "*.joblib"))
+        for f in ("state.json",):
+            p = Path(cfg["_work"]) / f
+            if p.exists():
+                shutil.copy(p, snap / f)
+        cfg_copy = Path(cfg["_path"])
+        shutil.copy(cfg_copy, snap / cfg_copy.name)
+        repo = dataset_repo(cfg, "runs")
+        a = api()
+        _retry(lambda: a.create_repo(repo, repo_type="dataset", private=bool(cfg["hub"].get("runs_private", False)), exist_ok=True))
+        _retry(lambda: a.upload_folder(folder_path=str(snap), path_in_repo=f"runs/{rid}", repo_id=repo, repo_type="dataset", commit_message=f"{'Final' if final else 'Live'} logs for {rid}"))
+        shutil.rmtree(snap, ignore_errors=True)
+        log("run uploaded", runs_url(cfg))
+        return True
+    except Exception as e:
+        log("run upload failed, will retry after the next step:", e)
+        return False
 
 
 def model_dir(cfg, name):

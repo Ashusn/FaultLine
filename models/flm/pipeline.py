@@ -115,6 +115,11 @@ def step_eval(cfg, name):
     for p in wdir(cfg, "results").glob(f"{name}_*"):
         if p.is_file():
             shutil.copy(p, ev / p.name)
+    items = [p for p in wdir(cfg, "results", "items").glob(f"{name}_*.json")]
+    if items:
+        (ev / "items").mkdir()
+        for p in items:
+            shutil.copy(p, ev / "items" / p.name)
     push_folder(repo_id(cfg, name), ev, path_in_repo="eval", message="Upload eval results")
     shutil.rmtree(ev, ignore_errors=True)
     log(f"{name} eval", {k: v.get(cfg["models"][name]["main_metric"]) for k, v in res["splits"].items()})
@@ -126,6 +131,15 @@ def step_publish(cfg, name):
 
     repo = repo_id(cfg, name)
     push_text(repo, "README.md", model_card(cfg, name), message="Model card with results")
+    logs = [p for p in wdir(cfg, "logs").glob(f"{name}__*.log")]
+    if logs:
+        from .hub import push_folder
+
+        ld = wdir(cfg, "logs_upload", name)
+        for p in logs:
+            shutil.copy(p, ld / p.name)
+        push_folder(repo, ld, path_in_repo="logs", message="Training and eval logs")
+        shutil.rmtree(ld, ignore_errors=True)
     add_to_collection(cfg, [(repo, "model")])
     log(f"{name} published", repo)
 

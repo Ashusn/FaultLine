@@ -9,6 +9,8 @@ from .split import SPLITS, leak_report, split_incidents
 
 
 def split_path(cfg, name):
+    if name == "bench":
+        return wpath(cfg, "data", "bench", "incidents_full.jsonl")
     return wpath(cfg, "data", "splits", f"{name}.jsonl")
 
 

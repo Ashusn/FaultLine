@@ -10,7 +10,7 @@ import time
 from flm.common import ROOT, load_cfg, log
 from flm.steps import load_state, mark_done, reset, step_list
 
-USAGE = "usage: python run.py check | pipeline | run <step> | status | reset <step> | steps | diffcheck [configs...]"
+USAGE = "usage: python run.py check | pipeline | run <step> | status | reset <step> | steps | proof | reproduce | diffcheck [configs...]"
 
 
 def run_step(cfg, step):
@@ -28,6 +28,10 @@ def run_step(cfg, step):
         return data.step_claims(cfg)
     if step == "data:push":
         return data.step_push(cfg)
+    if step.startswith("bench:"):
+        from flm import bench
+
+        return {"bench:freeze": bench.step_freeze, "bench:run": bench.step_run, "bench:publish": bench.step_publish}[step](cfg)
     if step == "report":
         return pipeline.step_report(cfg)
     name, _, stage = step.partition(":")
@@ -36,7 +40,24 @@ def run_step(cfg, step):
     raise SystemExit(f"unknown step {step!r}")
 
 
+def _run_logged(step, logfile):
+    with open(logfile, "a") as lf:
+        lf.write(f"==== {step} {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
+        p = subprocess.Popen([sys.executable, str(ROOT / "run.py"), "run", step], cwd=ROOT, env=os.environ.copy(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        for line in p.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            lf.write(line)
+        return p.wait()
+
+
 def pipeline_all(cfg):
+    from flm.common import wdir
+    from flm.hub import run_id, runs_url, upload_run
+
+    upload = os.environ.get("UPLOAD_LOGS", "1") == "1"
+    if upload:
+        run_id(cfg)
     done = set(load_state(cfg)["done"])
     for step in step_list(cfg):
         if step in done:
@@ -44,16 +65,28 @@ def pipeline_all(cfg):
             continue
         log(f"==== {step}")
         t = time.time()
-        r = subprocess.run([sys.executable, str(ROOT / "run.py"), "run", step], cwd=ROOT, env=os.environ.copy())
-        if r.returncode != 0:
-            log(f"STOPPED at {step} (exit {r.returncode})")
-            sys.exit(r.returncode)
+        rc = _run_logged(step, wdir(cfg, "logs") / f"{step.replace(':', '__')}.log")
         cfg = load_cfg()
-        mark_done(cfg, step, time.time() - t)
         dt = time.time() - t
+        if rc != 0:
+            log(f"STOPPED at {step} (exit {rc})")
+            if upload:
+                upload_run(cfg)
+            sys.exit(rc)
+        mark_done(cfg, step, dt)
         cost = dt / 3600 * float(cfg.get("gpu_hourly_usd", 0))
         log(f"{step} finished in {dt / 60:.1f} min, about ${cost:.2f}")
+        if upload:
+            upload_run(cfg)
     log("pipeline complete")
+    if upload:
+        ok = upload_run(cfg, final=True) or upload_run(cfg, final=True)
+        log("all logs and results are on HuggingFace:", runs_url(cfg))
+        if ok and os.environ.get("CLEAN_WORK") == "1":
+            import shutil
+
+            shutil.rmtree(cfg["_work"], ignore_errors=True)
+            log("local work folder deleted, everything lives on HuggingFace")
 
 
 def main(argv):
@@ -80,6 +113,18 @@ def main(argv):
             print(("done  " if s in st["done"] else "todo  ") + s + (f"  {st['durations'].get(s)}s" if s in st["durations"] else ""))
     elif cmd == "reset" and len(argv) == 2:
         print("reset:", reset(cfg, argv[1]) or "nothing matched")
+    elif cmd == "proof":
+        from flm.common import wdir
+        from flm.headline import build_headline
+        from flm.proof import build_proof
+
+        out = build_headline(cfg)
+        build_proof(cfg, out)
+        print(out / "PROOF.md")
+    elif cmd == "reproduce":
+        from flm.reproduce import run as reproduce
+
+        reproduce(cfg)
     elif cmd == "steps":
         print("\n".join(step_list(cfg)))
     else:

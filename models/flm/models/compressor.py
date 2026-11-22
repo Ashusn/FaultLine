@@ -47,7 +47,7 @@ def parse(text):
 
 
 def rows(cfg, split, n=None):
-    p = wpath(cfg, "data", "compressor", f"{split}.jsonl")
+    p = wpath(cfg, "data", "bench", "compressor.jsonl") if split == "bench" else wpath(cfg, "data", "compressor", f"{split}.jsonl")
     r = read_jsonl(p) if p.exists() else []
     return r[:n] if n else r
 

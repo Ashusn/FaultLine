@@ -10,7 +10,7 @@ KEYS = ["correct", "catch", "false_reject"]
 
 
 def rows(cfg, split, n=None):
-    p = wpath(cfg, "data", "claims", f"{split}.jsonl")
+    p = wpath(cfg, "data", "bench", "claims.jsonl") if split == "bench" else wpath(cfg, "data", "claims", f"{split}.jsonl")
     r = read_jsonl(p) if p.exists() else []
     if n and len(r) > n:
         r = random.Random(cfg.get("seed", 0)).sample(r, n)

@@ -28,6 +28,10 @@ Done when: catch rate beats the rule checker on wrong direction and unsupported 
 Code is ready in `flm/serve.py`. Ashutosh's framework calls it.
 Done when: his framework runs one investigation through all endpoints.
 
+#### Phase 6b: Public benchmark and resume line (code ready)
+`bench:freeze`, `bench:run` and `bench:publish` run after the models. They freeze 500 held out incidents as `FaultLine_Bench` v1.0, score every system on it, and write the resume line with links to the results.
+Done when: `BENCH.md` is public, `python -m flm.bench score` gives the same numbers, and `report/resume_line.tex` is pasted into the resume.
+
 #### Phase 7: Real FaultLine data
 When his harness writes incidents in `INCIDENT_SCHEMA.md` format, add the file to `data.jsonl` in the config, rerun with the same configs, run the 500 incident eval, and publish.
 Done when: the eval page shows numbers on real FaultLine incidents.

@@ -2,7 +2,7 @@ import hashlib
 
 from .schema import group_key
 
-SPLITS = ["train", "val", "test", "test_ood_fault", "test_ood_app"]
+SPLITS = ["train", "val", "test", "test_ood_fault", "test_ood_app", "test_faultline"]
 
 
 def _bucket(key, seed):
@@ -15,10 +15,14 @@ def split_incidents(incidents, cfg):
     seed = cfg.get("seed", 0)
     hold_fault = set(s.get("holdout_faults") or [])
     hold_app = set(s.get("holdout_apps") or [])
+    dedicated = set(s.get("dedicated_sources") or [])
     val_frac, test_frac = float(s["val"]), float(s["test"])
     out = {k: [] for k in SPLITS}
     for inc in incidents:
         lab = inc["label"]
+        if inc["source"] in dedicated:
+            out["test_faultline"].append(inc)
+            continue
         if inc["app"] in hold_app:
             out["test_ood_app"].append(inc)
             continue
@@ -45,10 +49,13 @@ def leak_report(splits, cfg):
         for b in names[i + 1 :]:
             if ids[a] & ids[b]:
                 problems.append(f"incident ids shared by {a} and {b}")
-            if groups[a] & groups[b]:
+            if groups[a] & groups[b] and "test_faultline" not in (a, b):
                 problems.append(f"groups shared by {a} and {b}: {sorted(groups[a] & groups[b])[:3]}")
     train_faults = {i["label"]["fault"] for i in splits["train"]}
     train_apps = {i["app"] for i in splits["train"]}
+    for src in s.get("dedicated_sources") or []:
+        if any(i["source"] == src for n in ("train", "val") for i in splits[n]):
+            problems.append(f"dedicated source {src} found in train or val")
     for f in s.get("holdout_faults") or []:
         if f in train_faults:
             problems.append(f"holdout fault {f} found in train")

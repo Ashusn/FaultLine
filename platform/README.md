@@ -21,6 +21,15 @@ One Go module (`go.mod`) for the whole platform.
 * `docs/adr/`: one file per architecture decision record
 * `Makefile`: `make build`, `make test`, `make up`
 
+## Conventions
+
+Fixed on day one. Details in [docs/adr/0001-day-one-conventions.md](docs/adr/0001-day-one-conventions.md).
+
+* One Postgres instance, one database per service. No service reads another's tables.
+* Events are JSON with `eventId`, `eventType`, `orderId`, `occurredAt`, `payload`. `orderId` is the Kafka key, so one order's events stay in order.
+* Topics: `orders.events`, `inventory.events`, `payments.events`, each with a `.dlt` dead letter topic.
+* Every table has `created_at` and `updated_at`.
+
 ## Stack
 
 Fill this in before writing code.

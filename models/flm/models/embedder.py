@@ -14,7 +14,7 @@ def corpus(cfg):
 
 
 def queries(cfg, split, n=None):
-    p = wpath(cfg, "data", "retrieval", f"queries_{split}.jsonl")
+    p = wpath(cfg, "data", "bench", "queries.jsonl") if split == "bench" else wpath(cfg, "data", "retrieval", f"queries_{split}.jsonl")
     rows = read_jsonl(p) if p.exists() else []
     return rows[:n] if n else rows
 

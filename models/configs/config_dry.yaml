@@ -11,6 +11,8 @@ hub:
     compressor: Compressor_Data
     retrieval: Retrieval_Data
     claims: Claims_Data
+    bench: Bench
+    runs: Runs
 check:
   python:
   - 3
@@ -55,6 +57,8 @@ split:
   holdout_apps:
   - bookstore
   - sock_shop
+  dedicated_sources:
+  - faultline
 retrieval:
   runbook_dirs:
   - runbooks
@@ -80,6 +84,7 @@ eval:
   - test
   - test_ood_fault
   - test_ood_app
+  - test_faultline
   gate_drop: 1.0
   gate_drop_by_model: {}
 models:
@@ -247,3 +252,46 @@ models:
     max_length: 384
     threshold: 0.5
     max_steps: 10
+proof:
+  tolerance: 0.5
+  claims:
+    - id: top1
+      text: "Names the failing service correctly in {value}% of {n} held out incidents of FaultLine Bench."
+      source: bench
+      key: top1
+      metric: top1
+    - id: top3
+      text: "The failing service is in the top 3 in {value}% of {n} held out incidents."
+      source: bench
+      key: top3
+      metric: top3
+    - id: uncited
+      text: "{value} uncited claims in the final reports of {n} investigations."
+      source: external
+      file: agent_eval.json
+      key: uncited_claims
+    - id: compress
+      text: "The compressor shrinks each telemetry window by {value}% of its tokens, on {n} incidents."
+      source: bench
+      key: token_reduction
+    - id: recall_base
+      text: "Recall@10 of the base embedder is {value}% on {n} incidents."
+      source: bench
+      key: recall10_base
+    - id: recall
+      text: "Recall@10 of the fine tuned embedder is {value}% on {n} incidents."
+      source: bench
+      key: recall10_trained
+  latex: |
+    \item \href{https://github.com/amareshhebbar/FaultLine}{\textbf{FaultLine}} $\cdot$ \href{https://huggingface.co/datasets/AmareshHebbar/DRY_FaultLine_Bench}{Bench} $\cdot$ \href{{proof}}{Proof} \textit{(ML Lead)}: Root cause AI for microservices that names the failing service correctly in {top1}\% of {top1_n} held out incidents ({top3}\% in top 3)[[ with {uncited} uncited claims]]; fine tuned and published 5 models on HuggingFace[[, including a Qwen3 0.6B compressor that shrinks telemetry windows by {compress}\%]][[; the fine tuned embedder lifts Recall@10 from {recall_base}\% to {recall}\% over bge small]].
+
+bench:
+  version: v0.1
+  size: 40
+  reuse: true
+  max_end_to_end_drop: 0.05
+  compressor: [compressor_grpo, compressor_sft]
+  resume:
+    github: https://github.com/amareshhebbar/FaultLine
+    compressor_label: Qwen3 0.6B
+    embedder_label: bge small

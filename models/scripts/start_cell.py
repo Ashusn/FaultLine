@@ -10,9 +10,12 @@ os.environ["HF_TOKEN"] = "PASTE_NEW_HF_TOKEN"
 os.environ["RUNPOD_API_KEY"] = "PASTE_NEW_RUNPOD_KEY"
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 os.environ["AUTO_TERMINATE"] = "1"
+os.environ["UPLOAD_LOGS"] = "1"
+os.environ["CLEAN_WORK"] = "1"
 MODE = "dry"
 ONLY_MODELS = ""
 REPO = "https://github.com/amareshhebbar/FaultLine"
+BRANCH = "embedding-integrate"
 
 CONFIGS = {"dry": "configs/config_dry.yaml", "small": "configs/config.yaml", "big": "configs/config_big_budget.yaml"}
 BASE = "/workspace"
@@ -36,7 +39,7 @@ print(sh(f"df -h {BASE} | tail -n 1"))
 if sh("ps aux | grep -E '[r]eal\\.sh|[r]un\\.py pipeline'"):
     print("ALREADY RUNNING, showing the log")
 else:
-    print(sh(f"git -C {BASE}/FaultLine pull 2>&1 || git clone {REPO} {BASE}/FaultLine 2>&1"))
+    print(sh(f"if [ -d {BASE}/FaultLine/.git ]; then git -C {BASE}/FaultLine fetch -q origin && git -C {BASE}/FaultLine checkout -q {BRANCH} && git -C {BASE}/FaultLine pull -q; else git clone -q -b {BRANCH} {REPO} {BASE}/FaultLine; fi 2>&1; git -C {BASE}/FaultLine log --oneline -1"))
     real = """#!/bin/bash
 cd __CODE__
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -46,12 +49,12 @@ export ONLY_MODELS="__ONLY__"
 echo "######## RUN START __MODE__ $(date) ########"
 bash setup.sh
 .venv/bin/python run.py diffcheck
-.venv/bin/python run.py pipeline
-[ -f __WORK__/report/HEADLINE.md ] && echo "PROOF OK: FaultLine models __MODE__" || echo "PROOF MISSING: FaultLine models __MODE__"
-.venv/bin/python run.py status
+.venv/bin/python run.py pipeline 2>&1 | tee __LOGS__/pipeline.log
+grep -q "pipeline complete" __LOGS__/pipeline.log && echo "PROOF OK: FaultLine models __MODE__" || echo "PROOF MISSING: FaultLine models __MODE__"
+grep -A1 "RESUME LINE:" __LOGS__/pipeline.log | tail -n 1
 echo "NIGHT RUN FINISHED"
 """
-    for k, v in {"__CODE__": CODE, "__CFG__": CONFIGS[MODE], "__WORK__": WORK, "__ONLY__": ONLY_MODELS, "__MODE__": MODE}.items():
+    for k, v in {"__CODE__": CODE, "__CFG__": CONFIGS[MODE], "__WORK__": WORK, "__ONLY__": ONLY_MODELS, "__MODE__": MODE, "__LOGS__": LOGS}.items():
         real = real.replace(k, v)
     open(f"{BASE}/real.sh", "w").write(real)
     mirror = r"""#!/bin/bash
@@ -59,7 +62,7 @@ L=__LOGS__
 up() {
   PY=__CODE__/.venv/bin/python
   [ -x "$PY" ] || return 0
-  { echo "updated $(date)"; echo; df -h /workspace | tail -n 1; echo; grep -aE "RUN START|PROOF|FAILED|PASSED|STOPPED|CHECK PROBLEM|GB free|weights deleted|finished in|leak check|NIGHT RUN|TERMINATING|everything works" $L/night.log | tail -n 150; } > $L/summary.txt
+  { echo "updated $(date)"; echo; df -h /workspace | tail -n 1; echo; grep -aE "RUN START|PROOF|FAILED|PASSED|STOPPED|CHECK PROBLEM|GB free|weights deleted|finished in|leak check|NIGHT RUN|TERMINATING|everything works|run uploaded|benchmark card|proof page|item .href" $L/night.log | tail -n 150; } > $L/summary.txt
   rm -rf /tmp/logsnap; mkdir -p /tmp/logsnap/live
   cp $L/*.log $L/summary.txt /tmp/logsnap/live/ 2>/dev/null
   [ -d __WORK__/results ] && cp -r __WORK__/results /tmp/logsnap/results

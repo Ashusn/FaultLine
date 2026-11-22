@@ -1,0 +1,261 @@
+seed: 7
+gpu_hourly_usd: 1.09
+
+hub:
+  namespace: AmareshHebbar
+  prefix: FaultLine_
+  private: false
+  collection: FaultLine Models
+  collection_description: Models and datasets for FaultLine, root cause analysis with proof for distributed systems.
+  datasets:
+    incidents: Incidents
+    compressor: Compressor_Data
+    retrieval: Retrieval_Data
+    claims: Claims_Data
+    bench: Bench
+    runs: Runs
+
+check:
+  python: [3, 11]
+  require_gpu: true
+  require_hf: true
+  min_free_gb: 40
+  real_batch: true
+
+data:
+  window_s: 600
+  max_logs: 200
+  max_traces: 40
+  sim:
+    enabled: true
+    n_per_combo: 6
+    n_traces: 24
+  rcaeval:
+    enabled: true
+    repo: phamquiluan/RCAEval
+    suites: [re1, re2, re3]
+    max_cases: null
+  jsonl: []
+
+signals:
+  top_k: 8
+  z_min: 3.0
+  ratio_min: 0.405
+  err_min: 0.01
+  log_min_diff: 3
+  trace_min_err: 2
+
+split:
+  val: 0.15
+  test: 0.2
+  holdout_faults: [pool_exhaustion, socket_exhaustion]
+  holdout_apps: [bookstore, sock_shop]
+  dedicated_sources: [faultline]
+
+retrieval:
+  runbook_dirs: [runbooks]
+  code_dirs: [../platform/services]
+  max_code_positives: 3
+  max_positives_per_query: 4
+  query_anomalies: 5
+  synthetic:
+    enabled: false
+    base_url: http://localhost:8000/v1
+    model: Qwen/Qwen2.5-7B-Instruct
+    api_key_env: SYNTH_API_KEY
+    per_query: 2
+    temperature: 0.8
+
+claims:
+  false_per_item: 2
+
+eval:
+  quick_n: 150
+  full_n: null
+  min_quick_items: 100
+  full_splits: [test, test_ood_fault, test_ood_app, test_faultline]
+  gate_drop: 0.03
+  gate_drop_by_model: {}
+
+models:
+  embedder:
+    type: embedder
+    repo: Embed_bge_base
+    base: BAAI/bge-base-en-v1.5
+    dataset: retrieval
+    description: Embedding model for incident retrieval over runbooks, past incidents and source code.
+    method: contrastive fine tuning with cached multiple negatives ranking loss and mined hard negatives
+    query_prefix: "Represent this sentence for searching relevant passages: "
+    doc_prefix: ""
+    baselines:
+      - {id: intfloat/e5-base-v2, label: e5_base, query_prefix: "query: ", doc_prefix: "passage: "}
+      - {id: thenlper/gte-base, label: gte_base, query_prefix: "", doc_prefix: ""}
+    main_metric: ndcg@10
+    report_metrics: [recall@10, mrr@10, recall@50]
+    epochs: 2
+    batch_size: 64
+    mini_batch_size: 32
+    lr: 2.0e-5
+    warmup_steps: 20
+    max_seq_length: 512
+    hard_negatives: true
+    num_negatives: 3
+    neg_range_min: 5
+    neg_range_max: 50
+    neg_relative_margin: 0.05
+    usage: |
+      from sentence_transformers import SentenceTransformer
+      m = SentenceTransformer("{repo}")
+      q = m.encode(["Represent this sentence for searching relevant passages: payments latency p95 ms 40 to 900"])
+
+  reranker:
+    type: reranker
+    repo: Rerank_bge_base
+    base: BAAI/bge-reranker-base
+    dataset: retrieval
+    description: Cross encoder that reorders retrieved runbook, code and incident chunks for an incident query.
+    method: binary cross entropy on positives and hard negatives from the first stage retriever
+    first_stage: embedder
+    candidates: 50
+    negatives_per_query: 4
+    main_metric: ndcg@10
+    report_metrics: [recall@10, candidate_recall]
+    epochs: 1
+    batch_size: 32
+    lr: 2.0e-5
+    max_length: 512
+    usage: |
+      from sentence_transformers.cross_encoder import CrossEncoder
+      m = CrossEncoder("{repo}")
+      scores = m.predict([("payments latency rose", "fault db_slow ...")])
+
+  compressor_sft:
+    type: compressor
+    method_kind: sft
+    repo: Compressor_Qwen3_1.7B_SFT
+    base: Qwen/Qwen3-1.7B
+    dataset: compressor
+    description: Turns a long telemetry window into short structured incident signals as JSON.
+    method: supervised fine tuning with LoRA on window to signals pairs
+    main_metric: signal_f1
+    report_metrics: [valid_json, token_ratio, downstream_top1]
+    lora: true
+    lora_r: 32
+    lora_alpha: 64
+    lora_dropout: 0.05
+    epochs: 2
+    batch_size: 2
+    grad_accum: 8
+    lr: 1.0e-4
+    warmup_steps: 20
+    max_length: 4608
+    max_input_chars: 10000
+    max_new_tokens: 512
+    gradient_checkpointing: true
+    eval_batch: 16
+    use_vllm: true
+    trade_offs: Greedy decoding. The model only reports what it sees in the window, so a fault that leaves no trace in metrics, logs or spans is invisible to it.
+
+  compressor_grpo:
+    type: compressor
+    method_kind: grpo
+    init_from: compressor_sft
+    repo: Compressor_Qwen3_1.7B_GRPO
+    base: Qwen/Qwen3-1.7B
+    dataset: compressor
+    description: The SFT compressor further trained with GRPO, using a reward we can check against the reference signals.
+    method: GRPO with rewards for valid JSON, signal F1 against the reference, and length
+    main_metric: signal_f1
+    report_metrics: [valid_json, token_ratio, downstream_top1]
+    lora: true
+    lora_r: 16
+    lora_alpha: 32
+    max_steps: 150
+    max_prompts: 1500
+    batch_size: 8
+    grad_accum: 1
+    num_generations: 4
+    lr: 5.0e-6
+    beta: 0.04
+    temperature: 0.8
+    reward_weights: [0.3, 1.0, 0.3]
+    max_length: 4608
+    max_new_tokens: 512
+    gradient_checkpointing: true
+    eval_batch: 16
+    use_vllm: true
+    train_vllm: false
+
+  classifier:
+    type: classifier
+    repo: RootCause_Classifier
+    base: rule
+    dataset: incidents
+    description: Fast root cause model. Ranks services and predicts the fault kind from incident signals in milliseconds.
+    method: gradient boosted trees on per service signal features
+    main_metric: top1
+    report_metrics: [top3, fault_acc]
+    study_sources: [compressor_sft, compressor_grpo]
+    max_iter: 300
+    lr: 0.05
+    max_leaf_nodes: 31
+
+  verifier:
+    type: verifier
+    repo: ClaimVerifier_DeBERTa_v3_base
+    base: microsoft/deberta-v3-base
+    dataset: claims
+    description: Checks whether a report sentence is supported by the evidence it cites.
+    method: cross encoder fine tuned on true claims and six kinds of broken claims
+    main_metric: correct
+    report_metrics: [catch, false_reject]
+    epochs: 2
+    batch_size: 32
+    lr: 2.0e-5
+    warmup_steps: 50
+    max_length: 384
+    threshold: 0.5
+
+proof:
+  tolerance: 0.5
+  claims:
+    - id: top1
+      text: "Names the failing service correctly in {value}% of {n} held out incidents of FaultLine Bench."
+      source: bench
+      key: top1
+      metric: top1
+    - id: top3
+      text: "The failing service is in the top 3 in {value}% of {n} held out incidents."
+      source: bench
+      key: top3
+      metric: top3
+    - id: uncited
+      text: "{value} uncited claims in the final reports of {n} investigations."
+      source: external
+      file: agent_eval.json
+      key: uncited_claims
+    - id: compress
+      text: "The compressor shrinks each telemetry window by {value}% of its tokens, on {n} incidents."
+      source: bench
+      key: token_reduction
+    - id: recall_base
+      text: "Recall@10 of the base embedder is {value}% on {n} incidents."
+      source: bench
+      key: recall10_base
+    - id: recall
+      text: "Recall@10 of the fine tuned embedder is {value}% on {n} incidents."
+      source: bench
+      key: recall10_trained
+  latex: |
+    \item \href{https://github.com/amareshhebbar/FaultLine}{\textbf{FaultLine}} $\cdot$ \href{https://huggingface.co/datasets/AmareshHebbar/FaultLine_Bench}{Bench} $\cdot$ \href{{proof}}{Proof} \textit{(ML Lead)}: Root cause AI for microservices that names the failing service correctly in {top1}\% of {top1_n} held out incidents ({top3}\% in top 3)[[ with {uncited} uncited claims]]; fine tuned and published 5 models on HuggingFace[[, including a Qwen3 1.7B compressor that shrinks telemetry windows by {compress}\%]][[; the fine tuned embedder lifts Recall@10 from {recall_base}\% to {recall}\% over bge base]].
+
+bench:
+  version: v1.0
+  size: 500
+  reuse: true
+  max_end_to_end_drop: 0.05
+  compressor: [compressor_grpo, compressor_sft]
+  resume:
+    github: https://github.com/amareshhebbar/FaultLine
+    compressor_label: Qwen3 1.7B
+    embedder_label: bge base

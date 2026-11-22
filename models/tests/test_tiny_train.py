@@ -140,3 +140,42 @@ def test_full_model_steps_with_fake_hub(tiny, monkeypatch):
     out = build_headline(tiny)
     text = (out / "HEADLINE.md").read_text()
     assert "classifier" in text and "Leak check: PASSED" in text
+
+
+def test_bench_freeze_run_publish_with_fake_hub(tiny, monkeypatch):
+    from flm import bench, hub
+    from flm.common import read_json, read_jsonl, wpath
+
+    class FakeApi:
+        def create_tag(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(hub, "push_folder", lambda *a, **k: None)
+    monkeypatch.setattr(hub, "push_text", lambda *a, **k: None)
+    monkeypatch.setattr(hub, "api", lambda: FakeApi())
+    monkeypatch.setattr(bench, "_tag_exists", lambda cfg, tag: False)
+    from flm.common import results_path, write_json
+
+    write_json(results_path(tiny, "compressor_grpo", "train"), {"local": str(wpath(tiny, "models", "compressor_grpo", "config.json").parent)})
+    tiny["bench"]["size"] = 30
+    bench.step_freeze(tiny)
+    pub = wpath(tiny, "bench_public", "x").parent
+    labels = read_jsonl(pub / "labels.jsonl")
+    assert len(labels) == 30
+    assert all("label" not in r for r in read_jsonl(pub / "incidents.jsonl"))
+    assert {r["origin_split"] for r in labels} <= set(bench.POOL)
+    bench.step_run(tiny)
+    res = read_json(wpath(tiny, "results", "bench", "bench_results.json"))
+    h = res["headline"]
+    assert h["n"] == 30 and h["top1"] is not None
+    assert (h["token_reduction"] is not None) == h["compressor_keeps_accuracy"]
+    assert "end_to_end" in res["systems"] and "embedder_trained" in res["systems"]
+    pred = read_jsonl(wpath(tiny, "results", "bench", "pred_end_to_end.jsonl"))
+    again = bench.score(pred, labels)
+    assert round(100 * again["top1"], 1) == h["top1"]
+    bench.step_publish(tiny)
+    line = (wpath(tiny, "report", "resume_line.tex")).read_text()
+    assert f"{{{h['top1']:g}}}\\%" in line and "Bench" in line and "PROOF.md#top1" in line
+    card = (wpath(tiny, "report", "BENCH_README.md")).read_text()
+    assert "configs:" in card and "## Leaderboard" in card and "## Resume line" in card and "end_to_end" in card
+    assert (wpath(tiny, "report", "PROOF.md")).exists()

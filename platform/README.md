@@ -4,8 +4,22 @@ The shop that gets broken on purpose. Owned by the **platform** side.
 
 ## What lives here
 
-* `services/`: one folder per microservice
-* `deploy/`: Docker Compose for local runs, Kubernetes manifests later
+One Go module (`go.mod`) for the whole platform.
+
+* `cmd/<service>/`: `main.go` for each binary: gateway, orders, payments, inventory, chaos
+* `internal/<service>/`: handlers, service and repository code private to one service
+* `pkg/`: code shared by all services
+  * `events/`: event structs
+  * `outbox/`: transactional outbox table and relay
+  * `inbox/`: `processed_events` dedup
+  * `idempotency/`: HTTP middleware
+  * `telemetry/`: OpenTelemetry, slog and Prometheus setup
+* `migrations/<service>/`: SQL migrations, one folder per service database
+* `deploy/compose/`: `docker-compose.yml` and Grafana dashboards
+* `deploy/k8s/`: Kubernetes manifests or Helm chart
+* `loadtest/`: k6 scripts
+* `docs/adr/`: one file per architecture decision record
+* `Makefile`: `make build`, `make test`, `make up`
 
 ## Stack
 

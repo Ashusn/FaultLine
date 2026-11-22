@@ -167,7 +167,7 @@ def test_steps_and_only_models(cfg, monkeypatch):
     assert steps[0] == "check" and steps[-1] == "report"
     assert steps.index("compressor_sft:publish") < steps.index("compressor_grpo:train")
     monkeypatch.setenv("ONLY_MODELS", "classifier")
-    assert [s for s in step_list(cfg) if ":" in s and not s.startswith("data")] == [f"classifier:{x}" for x in ("baseline", "train", "push", "verify", "eval", "publish")]
+    assert [s for s in step_list(cfg) if ":" in s and not s.startswith(("data", "bench"))] == [f"classifier:{x}" for x in ("baseline", "train", "push", "verify", "eval", "publish")]
     monkeypatch.setenv("ONLY_MODELS", "nope")
     with pytest.raises(SystemExit):
         step_list(cfg)
@@ -199,3 +199,180 @@ def test_diffcheck_compare():
 
     ch = compare({"a": {"b": 1, "c": 2}}, {"a": {"b": 1, "c": 3}, "d": 4})
     assert ("a.c", 2, 3) in ch and ("d", "<missing>", 4) in ch and len(ch) == 2
+
+
+def test_dedicated_source_goes_to_its_own_split(cfg):
+    from flm.simulate import simulate
+
+    incs = simulate(n_per_combo=1, seed=0, apps=["faultline"])
+    for i in incs[:5]:
+        i["source"] = "faultline"
+        i["incident_id"] = "real-" + i["incident_id"]
+    s = split_incidents(incs, cfg)
+    assert len(s["test_faultline"]) == 5
+    assert leak_report(s, cfg)["ok"]
+
+
+MODEL_CLAIMS = {
+    "tolerance": 0.5,
+    "claims": [
+        {"id": "top1", "text": "top1 {value}% of {n}", "model": "classifier", "metric": "top1", "kind": "percent", "split": "test_faultline", "fallback_splits": ["test"]},
+        {"id": "top3", "text": "top3 {value}% of {n}", "model": "classifier", "metric": "top3", "kind": "percent", "split": "test_faultline", "fallback_splits": ["test"]},
+        {"id": "uncited", "text": "{value} uncited", "source": "external", "file": "agent_eval.json", "key": "uncited_claims"},
+        {"id": "compress", "text": "{value}%", "model": "compressor_grpo", "metric": "token_ratio", "kind": "one_minus_percent", "split": "test"},
+        {"id": "recall", "text": "{value}%", "model": "embedder", "metric": "recall@10", "kind": "relative_gain_percent", "split": "test"},
+    ],
+    "latex": "names it in {top1}\\% of {top1_n} injected incidents with {uncited} uncited claims, shrinks by {compress}\\% {proof}",
+}
+
+
+def test_proof_page_and_latex(cfg, tmp_path):
+    from flm.common import write_json
+    from flm.proof import build_proof
+
+    c = json.loads(json.dumps(cfg))
+    c["_work"] = str(tmp_path / "w")
+    c["proof"] = MODEL_CLAIMS
+    write_json(wpath(c, "results", "classifier_full.json"), {"splits": {"test": {"top1": 0.8123, "top1_ci95": [0.75, 0.86], "top3": 0.97, "top3_ci95": [0.94, 0.99], "n": 500}}})
+    write_json(wpath(c, "results", "classifier_base_full.json"), {"splits": {"test": {"top1": 0.7, "top3": 0.9, "n": 500}}})
+    write_json(wpath(c, "results", "embedder_full.json"), {"splits": {"test": {"recall@10": 0.66, "n": 80}}})
+    write_json(wpath(c, "results", "embedder_base_full.json"), {"splits": {"test": {"recall@10": 0.55, "n": 80}}})
+    write_json(wpath(c, "results", "agent_eval.json"), {"uncited_claims": 0, "n": 500})
+    out = build_proof(c, tmp_path)
+    p = json.loads((out / "proof.json").read_text())
+    got = {x["id"]: x["result"] for x in p["claims"]}
+    assert got["top1"]["value"] == 81.2 and got["top1"]["ci95"] == [75.0, 86.0]
+    assert got["recall"]["value"] == 20.0
+    assert got["uncited"]["value"] == 0
+    assert got["compress"] is None
+    latex = p["latex"]
+    assert "81.2}" in latex and "of 500 injected" in latex and "{X}" in latex and "PROOF.md#top1" in latex
+    assert (out / "agent_eval.json").exists()
+    assert "Not measured yet." in (out / "PROOF.md").read_text()
+
+
+def test_reproduce_matches_published(built, monkeypatch):
+    import shutil
+
+    from flm import pipeline, reproduce
+    from flm.common import wdir, write_json
+    from flm.models import classifier
+    from flm.proof import build_proof
+
+    c = json.loads(json.dumps(built))
+    c["proof"] = MODEL_CLAIMS
+    out = classifier.train(c, "classifier")
+    write_json(wpath(c, "results", "classifier_train.json"), out)
+    write_json(wpath(c, "results", "classifier_full.json"), pipeline._full(c, "classifier", out["local"]))
+    build_proof(c, wdir(c, "published"))
+    keep = wdir(c, "keep_model")
+    shutil.copytree(out["local"], keep, dirs_exist_ok=True)
+
+    def fake_model(cfg, name):
+        d = wdir(cfg, "repro_models", name)
+        shutil.copytree(keep, d, dirs_exist_ok=True)
+        return str(d)
+
+    monkeypatch.setattr(reproduce, "fetch_data", lambda cfg: None)
+    monkeypatch.setattr(reproduce, "fetch_model", fake_model)
+    monkeypatch.setenv("CLAIMS", "top1,top3")
+    reproduce.run(c)
+    rows = read_json(wpath(c, "results", "reproduce.json"))
+    assert [r["id"] for r in rows] == ["top1", "top3"] and all(r["match"] for r in rows)
+
+
+def test_bench_select_and_score(built):
+    from flm import bench
+    from flm.data import load_split
+
+    c = json.loads(json.dumps(built))
+    c["bench"]["size"] = 25
+    pool = [(s, i) for s in bench.POOL for i in load_split(c, s)]
+    a = bench.select(c, pool)
+    b = bench.select(c, pool)
+    assert [i["incident_id"] for _, i in a] == [i["incident_id"] for _, i in b]
+    assert len(a) == 25 and len({i["incident_id"] for _, i in a}) == 25
+    assert len({i["app"] for _, i in a}) >= 2
+    labels = [{"incident_id": i["incident_id"], "service": i["label"]["service"], "fault": i["label"]["fault"]} for _, i in a]
+    perfect = [{"incident_id": l["incident_id"], "services": [l["service"]], "fault": l["fault"]} for l in labels]
+    assert bench.score(perfect, labels)["top1"] == 1.0
+    assert bench.score(perfect[:5], labels)["missing_predictions"] == 20
+
+
+def test_resume_line_only_uses_measured_numbers(cfg, tmp_path):
+    from flm.common import write_json, wpath
+    from flm.proof import build_proof
+
+    c = json.loads(json.dumps(cfg))
+    c["_work"] = str(tmp_path)
+    write_json(wpath(c, "results", "bench", "bench_results.json"), {"version": "v0.1", "n": 40, "systems": {}, "headline": {"system": "end_to_end", "n": 40, "top1": 71.2, "top3": 93.0, "token_reduction": None, "recall10_base": 40.0, "recall10_trained": 55.5}})
+    out = build_proof(c, tmp_path)
+    latex = json.loads((out / "proof.json").read_text())["latex"]
+    assert "{71.2}\\% of 40 held out incidents" in latex
+    assert "uncited" not in latex and "compressor" not in latex
+    assert "Recall@10 from" in latex and "{55.5}" in latex
+    assert "PROOF.md" in latex
+
+
+def test_reproduce_rescores_bench_predictions(cfg, tmp_path, monkeypatch):
+    import shutil
+
+    from flm import bench, reproduce
+    from flm.common import wdir, write_json, write_jsonl
+    from flm.proof import build_proof
+
+    c = json.loads(json.dumps(cfg))
+    c["_work"] = str(tmp_path)
+    labels = [{"incident_id": f"i{k}", "service": "a", "fault": "latency"} for k in range(20)]
+    preds = [{"incident_id": f"i{k}", "services": ["a" if k % 5 else "b", "a"], "fault": "latency"} for k in range(20)]
+    sc = bench.score(preds, labels)
+    res = {"version": "v0.1", "n": 20, "systems": {"end_to_end": {"top1": sc["top1"], "top1_ci95": sc["top1_ci95"]}}, "headline": {"system": "end_to_end", "n": 20, "top1": round(100 * sc["top1"], 1), "top3": round(100 * sc["top3"], 1)}}
+    write_json(wpath(c, "results", "bench", "bench_results.json"), res)
+    write_jsonl(wpath(c, "results", "bench", "pred_end_to_end.jsonl"), preds)
+    pub = wdir(c, "published")
+    build_proof(c, pub)
+    shutil.copytree(wdir(c, "results", "bench"), pub / "results" / "v0.1")
+    write_jsonl(pub / "labels.jsonl", labels)
+    monkeypatch.setattr(reproduce, "fetch_data", lambda cfg: None)
+    monkeypatch.setenv("CLAIMS", "top1,top3")
+    reproduce.run(c)
+    rows = read_json(wpath(c, "results", "reproduce.json"))
+    assert [r["id"] for r in rows] == ["top1", "top3"] and all(r["match"] for r in rows)
+    assert rows[0]["published"] == 80.0
+
+
+def test_upload_run_sends_logs_results_and_state(cfg, tmp_path, monkeypatch):
+    from flm import hub
+    from flm.common import wdir
+
+    c = json.loads(json.dumps(cfg))
+    c["_work"] = str(tmp_path)
+    (wdir(c, "logs") / "data__build.log").write_text("leak check PASSED\n")
+    write = wdir(c, "results") / "x.json"
+    write.write_text("{}")
+    seen = {}
+
+    class FakeApi:
+        def create_repo(self, repo, **k):
+            seen["repo"] = repo
+
+        def upload_folder(self, folder_path, path_in_repo, **k):
+            from pathlib import Path
+
+            seen["path"] = path_in_repo
+            seen["files"] = sorted(p.relative_to(folder_path).as_posix() for p in Path(folder_path).rglob("*") if p.is_file())
+
+    monkeypatch.setattr(hub, "api", lambda: FakeApi())
+    assert hub.upload_run(c, final=True)
+    rid = hub.run_id(c)
+    assert seen["repo"].endswith("DRY_FaultLine_Runs") and seen["path"] == f"runs/{rid}"
+    assert "logs/data__build.log" in seen["files"] and "results/x.json" in seen["files"] and "state.json" in seen["files"]
+    assert hub.run_id(c) == rid
+
+
+def test_run_logged_writes_step_log(tmp_path, monkeypatch):
+    import run as runner
+
+    log = tmp_path / "steps.log"
+    rc = runner._run_logged("nope:step", log)
+    assert rc != 0 and "unknown step" in log.read_text()

@@ -79,6 +79,9 @@ for each model:
   <model>:verify     download from hub, quick eval, gate against base, delete download
   <model>:eval       full eval, results uploaded to the repo eval folder
   <model>:publish    card with results, added to the collection
+bench:freeze         freeze 500 held out incidents as FaultLine_Bench, tag it v1.0 (reused if the tag exists)
+bench:run            leak guard, then every system on the frozen bench, predictions saved
+bench:publish        BENCH.md, prediction files and the resume line to the bench repo
 report               HEADLINE.md, then local weights deleted
 ```
 
@@ -116,6 +119,34 @@ ONLY_MODELS=classifier,verifier .venv/bin/python run.py pipeline
 bash scripts/stop.sh
 bash scripts/health.sh
 ```
+
+## Everything lands on HuggingFace by itself
+
+You do not keep any file yourself. The pipeline uploads everything as it runs:
+
+| what | where |
+| --- | --- |
+| benchmark card (headline, leaderboard, links, resume line) | `AmareshHebbar/FaultLine_Bench` README |
+| proof page, one section per resume number | `FaultLine_Bench/PROOF.md` |
+| frozen bench files (inputs, answer key, manifest) | `FaultLine_Bench` at tag `v1.0` |
+| bench predictions and results | `FaultLine_Bench/results/v1.0/` |
+| every step log, every results file, state, config | `AmareshHebbar/FaultLine_Runs/runs/<run id>/`, uploaded after every step, also when a step fails |
+| model weights, card, training curves, eval files, step logs | each model repo, folders `training/`, `eval/`, `logs/` |
+| datasets with cards | `FaultLine_Incidents`, `FaultLine_Compressor_Data`, `FaultLine_Retrieval_Data`, `FaultLine_Claims_Data` |
+| one collection with all of it | `FaultLine Models` on your profile |
+
+With `CLEAN_WORK=1` (the pod cell sets it), the local work folder is deleted after the final upload.
+
+The resume line is built only from numbers that exist. Any clause whose number was not measured is left out. The compressor clause is only kept if the end to end top 1 is not worse than the classifier on rule signals by more than `bench.max_end_to_end_drop`.
+
+Anyone can check the numbers:
+
+```bash
+python -m flm.bench score --pred pred_end_to_end.jsonl --repo AmareshHebbar/FaultLine_Bench --revision v1.0
+FLM_CONFIG=configs/config.yaml FLM_WORK=/tmp/faultline_reproduce .venv/bin/python run.py reproduce
+```
+
+The first rescores the public predictions against the frozen answer key. The second downloads the published proof and does the same for every bench number.
 
 ## Where the data comes from
 

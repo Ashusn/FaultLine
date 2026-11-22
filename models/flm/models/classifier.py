@@ -74,17 +74,20 @@ class Classifier:
         return {"services": order, "service_scores": {names[i]: float(probs[i]) for i in range(len(names))}, "faults": faults[:3], "fault_scores": {str(c): float(p) for c, p in zip(self.fault.classes_, fp)}}
 
 
-def _signals_for(cfg, inc, source):
+def _sample_index(cfg, source):
     if source == "reference":
+        return None
+    idx = {}
+    for f in sorted(wdir(cfg, "results").glob(f"{source}_*_samples.jsonl")):
+        for r in read_jsonl(f):
+            idx[r["id"]] = r.get("pred")
+    return idx
+
+
+def _signals_for(inc, idx):
+    if idx is None:
         return inc["signals"]
-    p = wpath(cfg, "results", f"{source}_samples_index.json")
-    if not p.exists():
-        idx = {}
-        for f in sorted(Path(wpath(cfg, "results", "x").parent).glob(f"{source}_*_samples.jsonl")):
-            for r in read_jsonl(f):
-                idx[r["id"]] = r.get("pred")
-        write_json(p, idx)
-    return read_json(p).get(inc["incident_id"]) or {"anomalies": []}
+    return idx.get(inc["incident_id"]) or {"anomalies": []}
 
 
 def evaluate(cfg, name, ref, split, n=None, source="reference"):
@@ -92,16 +95,17 @@ def evaluate(cfg, name, ref, split, n=None, source="reference"):
     if not incs:
         return None
     clf = None if ref == "rule" else Classifier(ref)
+    idx = _sample_index(cfg, source)
     items = []
     t = time.time()
     for inc in incs:
-        sig = _signals_for(cfg, inc, source)
+        sig = _signals_for(inc, idx)
         if clf:
             p = clf.predict(sig, inc["services"])
             order, fault = p["services"], p["faults"][0]
         else:
             order, fault = rule_rank(sig, inc["services"]), None
-        items.append({"id": inc["incident_id"], "top1": 1.0 if order[0] == inc["label"]["service"] else 0.0, "top3": 1.0 if inc["label"]["service"] in order[:3] else 0.0, "fault_acc": (1.0 if fault == inc["label"]["fault"] else 0.0) if fault else None, "fault": inc["label"]["fault"]})
+        items.append({"id": inc["incident_id"], "ranked": order[:3], "pred_fault": fault, "top1": 1.0 if order[0] == inc["label"]["service"] else 0.0, "top3": 1.0 if inc["label"]["service"] in order[:3] else 0.0, "fault_acc": (1.0 if fault == inc["label"]["fault"] else 0.0) if fault else None, "fault": inc["label"]["fault"]})
     ms = (time.time() - t) * 1000 / len(incs)
     s = summarize(items, KEYS, seed=cfg.get("seed", 0))
     s["ms_per_incident"] = round(ms, 3)
@@ -114,7 +118,7 @@ def evaluate(cfg, name, ref, split, n=None, source="reference"):
 
 def study(cfg, name, ref):
     out = {}
-    sources = ["reference"] + [x for x in cfg["models"][name].get("study_sources", []) if list(Path(wpath(cfg, "results", "x").parent).glob(f"{x}_*_samples.jsonl"))]
+    sources = ["reference"] + [x for x in cfg["models"][name].get("study_sources", []) if list(wdir(cfg, "results").glob(f"{x}_*_samples.jsonl"))]
     for split in cfg["eval"]["full_splits"]:
         row = {}
         for src in sources:
